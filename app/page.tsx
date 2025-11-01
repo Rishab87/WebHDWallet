@@ -1,29 +1,17 @@
 "use client";
 import { Keypair } from '@solana/web3.js';
 import * as bip39 from 'bip39';
-import { derivePath } from 'ed25519-hd-key';
-import { Buffer } from 'buffer';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { Eye, EyeOff, Copy, Wallet, Download, Upload } from 'lucide-react';
+import { Eye, EyeOff, Copy, Wallet, Download, Upload, Lock, Unlock } from 'lucide-react';
 import bs58 from 'bs58';
+import WalletStorage, { getKeypairFromMnemonic } from '@/lib/wallet-storage';
 
 const generateSolanaMnemonic = () => {
-  const mnemonic = bip39.generateMnemonic(128);
-  return mnemonic;
-};
-
-const getKeypairFromMnemonic = async (mnemonic: string, accountIndex: number = 0) => {
-  const seed = await bip39.mnemonicToSeed(mnemonic);
-  const seedBuffer = Buffer.from(seed).toString('hex');
-  const solanaDerivationPath = `m/44'/501'/${accountIndex}'/0'`;
-  const derivedSeed = derivePath(solanaDerivationPath, seedBuffer).key;
-  const keypair = Keypair.fromSeed(derivedSeed);
-
-  return keypair;
+  return bip39.generateMnemonic(128);
 };
 
 export default function Home() {
@@ -33,6 +21,16 @@ export default function Home() {
   const [showPrivateKeys, setShowPrivateKeys] = useState<{ [key: number]: boolean }>({});
   const [importSeed, setImportSeed] = useState<string>('');
   const [showImport, setShowImport] = useState<boolean>(false);
+  
+  // Password protection
+  const [password, setPassword] = useState<string>('');
+  const [confirmPassword, setConfirmPassword] = useState<string>('');
+  const [isLocked, setIsLocked] = useState<boolean>(true);
+  const [hasStoredWallet, setHasStoredWallet] = useState<boolean>(false);
+
+  useEffect(() => {
+    setHasStoredWallet(WalletStorage.hasStoredWallet());
+  }, []);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -42,13 +40,42 @@ export default function Home() {
     setShowPrivateKeys(prev => ({ ...prev, [index]: !prev[index] }));
   };
 
+  const lockWallet = () => {
+    setSeed('');
+    setKeypairs([]);
+    setPassword('');
+    setIsLocked(true);
+    setShowPrivateKeys({});
+  };
+
   const resetWallet = () => {
+    WalletStorage.clearStorage();
     setSeed('');
     setKeypairs([]);
     setHasNotedSeed(false);
     setShowPrivateKeys({});
     setImportSeed('');
     setShowImport(false);
+    setPassword('');
+    setConfirmPassword('');
+    setIsLocked(true);
+    setHasStoredWallet(false);
+  };
+
+  const unlockWallet = async () => {
+    try {
+      const decryptedSeed = await WalletStorage.loadDecryptedSeed(password);
+      if (decryptedSeed) {
+        setSeed(decryptedSeed);
+        setHasNotedSeed(true);
+        setIsLocked(false);
+        // Load first wallet
+        const firstKeypair = await getKeypairFromMnemonic(decryptedSeed, 0);
+        setKeypairs([firstKeypair]);
+      }
+    } catch (error) {
+      alert('Invalid password');
+    }
   };
 
   const handleGenerateSeed = async () => {
@@ -61,17 +88,84 @@ export default function Home() {
       alert('Invalid seed phrase. Please check and try again.');
       return;
     }
+    if (password.length < 8) {
+      alert('Password must be at least 8 characters');
+      return;
+    }
+    if (password !== confirmPassword) {
+      alert('Passwords do not match');
+      return;
+    }
+
     setSeed(importSeed.trim());
     setHasNotedSeed(true);
+    setIsLocked(false);
+    
+    // Save encrypted seed
+    await WalletStorage.saveEncryptedSeed(importSeed.trim(), password);
+    setHasStoredWallet(true);
+    
     const firstKeypair = await getKeypairFromMnemonic(importSeed.trim(), 0);
     setKeypairs([firstKeypair]);
   };
 
   const handleConfirmSeed = async () => {
+    if (password.length < 8) {
+      alert('Password must be at least 8 characters');
+      return;
+    }
+    if (password !== confirmPassword) {
+      alert('Passwords do not match');
+      return;
+    }
+
     setHasNotedSeed(true);
+    setIsLocked(false);
+    
+    // Save encrypted seed
+    await WalletStorage.saveEncryptedSeed(seed, password);
+    setHasStoredWallet(true);
+    
     const firstKeypair = await getKeypairFromMnemonic(seed, 0);
     setKeypairs([firstKeypair]);
   };
+
+  // Unlock screen for returning users
+  if (hasStoredWallet && isLocked) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-8">
+        <div className="max-w-md mx-auto space-y-6 mt-20">
+          <div className="text-center mb-8">
+            <Lock className="h-16 w-16 mx-auto mb-4 text-purple-600" />
+            <h1 className="text-4xl font-bold text-gray-800 mb-2">Welcome Back</h1>
+            <p className="text-gray-600">Enter your password to unlock your wallet</p>
+          </div>
+
+          <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle>Unlock Wallet</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Input
+                type="password"
+                placeholder="Enter password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && unlockWallet()}
+              />
+              <Button onClick={unlockWallet} className="w-full" disabled={!password}>
+                <Unlock className="mr-2 h-4 w-4" />
+                Unlock
+              </Button>
+              <Button onClick={resetWallet} variant="outline" className="w-full">
+                Reset Wallet
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-8">
@@ -129,24 +223,33 @@ export default function Home() {
             <CardHeader>
               <CardTitle>Import Seed Phrase</CardTitle>
               <CardDescription>
-                Enter your 12-word seed phrase to import your wallets
+                Enter your 12-word seed phrase and set a password
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div>
-                <Input
-                  type="text"
-                  placeholder="Enter your 12-word seed phrase separated by spaces"
-                  value={importSeed}
-                  onChange={(e) => setImportSeed(e.target.value)}
-                  className="w-full"
-                />
-              </div>
+              <Input
+                type="text"
+                placeholder="Enter your 12-word seed phrase separated by spaces"
+                value={importSeed}
+                onChange={(e) => setImportSeed(e.target.value)}
+              />
+              <Input
+                type="password"
+                placeholder="Create a password (min 8 characters)"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <Input
+                type="password"
+                placeholder="Confirm password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
               <div className="flex gap-2">
                 <Button
                   onClick={handleImportSeed}
                   className="flex-1"
-                  disabled={!importSeed.trim()}
+                  disabled={!importSeed.trim() || !password || !confirmPassword}
                 >
                   Import Wallet
                 </Button>
@@ -154,6 +257,8 @@ export default function Home() {
                   onClick={() => {
                     setShowImport(false);
                     setImportSeed('');
+                    setPassword('');
+                    setConfirmPassword('');
                   }}
                   variant="outline"
                   className="flex-1"
@@ -191,6 +296,19 @@ export default function Home() {
                 </div>
               </div>
 
+              <Input
+                type="password"
+                placeholder="Create a password (min 8 characters)"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <Input
+                type="password"
+                placeholder="Confirm password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+
               <div className="flex gap-2">
                 <Button
                   onClick={() => copyToClipboard(seed)}
@@ -203,24 +321,28 @@ export default function Home() {
                 <Button
                   onClick={handleConfirmSeed}
                   className="flex-1"
+                  disabled={!password || !confirmPassword}
                 >
                   I Have Saved It Securely
                 </Button>
               </div>
 
-              <Button
-                onClick={resetWallet}
-                variant="ghost"
-                className="w-full"
-              >
+              <Button onClick={resetWallet} variant="ghost" className="w-full">
                 Cancel
               </Button>
             </CardContent>
           </Card>
         )}
 
-        {seed && hasNotedSeed && (
+        {seed && hasNotedSeed && !isLocked && (
           <>
+            <div className="flex justify-end">
+              <Button onClick={lockWallet} variant="outline" size="sm">
+                <Lock className="mr-2 h-4 w-4" />
+                Lock Wallet
+              </Button>
+            </div>
+
             <Card className="shadow-lg">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
