@@ -6,9 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { Eye, EyeOff, Copy, Wallet, Download, Upload, Lock, Unlock } from 'lucide-react';
+import { Eye, EyeOff, Copy, Wallet, Download, Upload, Lock, Unlock, RefreshCw, Send, ArrowUpRight } from 'lucide-react';
 import bs58 from 'bs58';
 import WalletStorage, { getKeypairFromMnemonic } from '@/lib/wallet-storage';
+import { getAccountInfo, sendSol, type NetworkType } from '@/lib/solana-rpc';
 
 const generateSolanaMnemonic = () => {
   return bip39.generateMnemonic(128);
@@ -22,11 +23,20 @@ export default function Home() {
   const [importSeed, setImportSeed] = useState<string>('');
   const [showImport, setShowImport] = useState<boolean>(false);
   
-  // Password protection
   const [password, setPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [isLocked, setIsLocked] = useState<boolean>(true);
   const [hasStoredWallet, setHasStoredWallet] = useState<boolean>(false);
+
+  const [balances, setBalances] = useState<{ [key: number]: number | null }>({});
+  const [accountExists, setAccountExists] = useState<{ [key: number]: boolean }>({});
+  const [loadingBalances, setLoadingBalances] = useState<{ [key: number]: boolean }>({});
+  const [selectedNetwork, setSelectedNetwork] = useState<NetworkType>('devnet');
+  
+  const [sendingIndex, setSendingIndex] = useState<number | null>(null);
+  const [recipientAddress, setRecipientAddress] = useState<string>('');
+  const [sendAmount, setSendAmount] = useState<string>('');
+  const [isSending, setIsSending] = useState<boolean>(false);
 
   useEffect(() => {
     setHasStoredWallet(WalletStorage.hasStoredWallet());
@@ -46,6 +56,8 @@ export default function Home() {
     setPassword('');
     setIsLocked(true);
     setShowPrivateKeys({});
+    setBalances({});
+    setAccountExists({});
   };
 
   const resetWallet = () => {
@@ -60,6 +72,8 @@ export default function Home() {
     setConfirmPassword('');
     setIsLocked(true);
     setHasStoredWallet(false);
+    setBalances({});
+    setAccountExists({});
   };
 
   const unlockWallet = async () => {
@@ -69,7 +83,6 @@ export default function Home() {
         setSeed(decryptedSeed);
         setHasNotedSeed(true);
         setIsLocked(false);
-        // Load first wallet
         const firstKeypair = await getKeypairFromMnemonic(decryptedSeed, 0);
         setKeypairs([firstKeypair]);
       }
@@ -101,7 +114,6 @@ export default function Home() {
     setHasNotedSeed(true);
     setIsLocked(false);
     
-    // Save encrypted seed
     await WalletStorage.saveEncryptedSeed(importSeed.trim(), password);
     setHasStoredWallet(true);
     
@@ -122,7 +134,6 @@ export default function Home() {
     setHasNotedSeed(true);
     setIsLocked(false);
     
-    // Save encrypted seed
     await WalletStorage.saveEncryptedSeed(seed, password);
     setHasStoredWallet(true);
     
@@ -130,7 +141,77 @@ export default function Home() {
     setKeypairs([firstKeypair]);
   };
 
-  // Unlock screen for returning users
+  const fetchBalance = async (index: number, publicKey: string) => {
+    setLoadingBalances(prev => ({ ...prev, [index]: true }));
+    try {
+      const accountInfo = await getAccountInfo(publicKey, selectedNetwork);
+      setBalances(prev => ({ ...prev, [index]: accountInfo.balance }));
+      setAccountExists(prev => ({ ...prev, [index]: accountInfo.exists }));
+    } catch (error) {
+      console.error('Error fetching balance:', error);
+      setBalances(prev => ({ ...prev, [index]: null }));
+    } finally {
+      setLoadingBalances(prev => ({ ...prev, [index]: false }));
+    }
+  };
+
+  const fetchAllBalances = async () => {
+    for (let i = 0; i < keypairs.length; i++) {
+      await fetchBalance(i, keypairs[i].publicKey.toBase58());
+    }
+  };
+
+  const handleSendSol = async (index: number) => {
+    if (!recipientAddress || !sendAmount) {
+      alert('Please enter recipient address and amount');
+      return;
+    }
+
+    const amount = parseFloat(sendAmount);
+    if (isNaN(amount) || amount <= 0) {
+      alert('Please enter a valid amount');
+      return;
+    }
+
+    if (balances[index] && amount > balances[index]!) {
+      alert('Insufficient balance');
+      return;
+    }
+
+    setIsSending(true);
+    try {
+      const signature = await sendSol(
+        keypairs[index],
+        recipientAddress,
+        amount,
+        selectedNetwork
+      );
+      
+      alert(`Transaction successful!\nSignature: ${signature}`);
+      
+      setRecipientAddress('');
+      setSendAmount('');
+      setSendingIndex(null);
+      await fetchBalance(index, keypairs[index].publicKey.toBase58());
+    } catch (error: any) {
+      alert(`Transaction failed: ${error.message}`);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const cancelSend = () => {
+    setSendingIndex(null);
+    setRecipientAddress('');
+    setSendAmount('');
+  };
+
+  useEffect(() => {
+    if (keypairs.length > 0 && !isLocked) {
+      fetchAllBalances();
+    }
+  }, [keypairs.length, selectedNetwork]);
+
   if (hasStoredWallet && isLocked) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-8">
@@ -336,7 +417,22 @@ export default function Home() {
 
         {seed && hasNotedSeed && !isLocked && (
           <>
-            <div className="flex justify-end">
+            <div className="flex justify-between items-center">
+              <div className="flex gap-2 items-center">
+                <select
+                  value={selectedNetwork}
+                  onChange={(e) => setSelectedNetwork(e.target.value as NetworkType)}
+                  className="px-3 py-2 border rounded-md bg-white"
+                >
+                  <option value="mainnet">Mainnet</option>
+                  <option value="devnet">Devnet</option>
+                  <option value="testnet">Testnet</option>
+                </select>
+                <Button onClick={fetchAllBalances} variant="outline" size="sm">
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Refresh Balances
+                </Button>
+              </div>
               <Button onClick={lockWallet} variant="outline" size="sm">
                 <Lock className="mr-2 h-4 w-4" />
                 Lock Wallet
@@ -377,7 +473,36 @@ export default function Home() {
                 {keypairs.map((kp, index) => (
                   <Card key={index} className="shadow-md hover:shadow-lg transition-shadow">
                     <CardHeader>
-                      <CardTitle className="text-lg">Wallet {index + 1}</CardTitle>
+                      <div className="flex justify-between items-center">
+                        <CardTitle className="text-lg">Wallet {index + 1}</CardTitle>
+                        <div className="flex items-center gap-2">
+                          {loadingBalances[index] ? (
+                            <RefreshCw className="h-4 w-4 animate-spin text-gray-400" />
+                          ) : (
+                            <>
+                              <span className="text-2xl font-bold text-purple-600">
+                                {balances[index] !== null && balances[index] !== undefined
+                                  ? `${balances[index].toFixed(4)} SOL`
+                                  : '—'}
+                              </span>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => fetchBalance(index, kp.publicKey.toBase58())}
+                              >
+                                <RefreshCw className="h-4 w-4" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {accountExists[index] === false && (
+                        <Alert className="mt-2">
+                          <AlertDescription className="text-sm">
+                            ⚠️ This account doesn't exist on the blockchain yet. Send some SOL to activate it.
+                          </AlertDescription>
+                        </Alert>
+                      )}
                     </CardHeader>
                     <CardContent className="space-y-3">
                       <div>
@@ -422,6 +547,62 @@ export default function Home() {
                           )}
                         </div>
                       </div>
+
+                      {sendingIndex === index ? (
+                        <div className="border-t pt-4 space-y-3">
+                          <h3 className="font-semibold text-gray-700">Send SOL</h3>
+                          <Input
+                            type="text"
+                            placeholder="Recipient address"
+                            value={recipientAddress}
+                            onChange={(e) => setRecipientAddress(e.target.value)}
+                          />
+                          <Input
+                            type="number"
+                            placeholder="Amount (SOL)"
+                            value={sendAmount}
+                            onChange={(e) => setSendAmount(e.target.value)}
+                            step="0.001"
+                          />
+                          <div className="flex gap-2">
+                            <Button
+                              onClick={() => handleSendSol(index)}
+                              className="flex-1"
+                              disabled={isSending}
+                            >
+                              {isSending ? (
+                                <>
+                                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                                  Sending...
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="mr-2 h-4 w-4" />
+                                  Send
+                                </>
+                              )}
+                            </Button>
+                            <Button
+                              onClick={cancelSend}
+                              variant="outline"
+                              className="flex-1"
+                              disabled={isSending}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Button
+                          onClick={() => setSendingIndex(index)}
+                          variant="default"
+                          className="w-full"
+                          disabled={!accountExists[index] || (balances[index] ?? 0) <= 0}
+                        >
+                          <ArrowUpRight className="mr-2 h-4 w-4" />
+                          Send SOL
+                        </Button>
+                      )}
                     </CardContent>
                   </Card>
                 ))}
